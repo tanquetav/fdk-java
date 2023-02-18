@@ -19,11 +19,8 @@ package com.fnproject.fn.runtime;
 
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.file.Files;
-import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
@@ -31,7 +28,6 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -43,8 +39,6 @@ import com.fnproject.fn.api.OutputEvent;
 import com.fnproject.fn.api.exception.FunctionInputHandlingException;
 import com.fnproject.fn.api.exception.FunctionOutputHandlingException;
 import com.fnproject.fn.runtime.exception.FunctionIOException;
-import com.fnproject.fn.runtime.exception.FunctionInitializationException;
-import com.fnproject.fn.runtime.ntv.UnixServerSocket;
 import com.fnproject.fn.runtime.ntv.UnixSocket;
 import org.apache.http.Header;
 import org.apache.http.HttpEntityEnclosingRequest;
@@ -82,17 +76,12 @@ import org.apache.http.protocol.UriHttpRequestHandlerMapper;
 public final class HTTPStreamCodec implements EventCodec, Closeable {
 
     public static final String HTTP_STREAM_FORMAT = "http-stream";
-    private static final String FN_LISTENER = "FN_LISTENER";
     private static final Set<String> stripInputHeaders;
     private static final Set<String> stripOutputHeaders;
-    private final Map<String, String> env;
     private final String fdkVersion;
     private final String runtimeVersion;
     private final AtomicBoolean stopping = new AtomicBoolean(false);
-    private final File socketFile;
     private final CompletableFuture<Boolean> stopped = new CompletableFuture<>();
-    private final UnixServerSocket socket;
-    private final File tempFile;
 
 
     static {
@@ -115,20 +104,8 @@ public final class HTTPStreamCodec implements EventCodec, Closeable {
         stripOutputHeaders = Collections.unmodifiableSet(hout);
     }
 
+    private final SocketDelegate socketDelegate;
 
-    private String randomString() {
-        int leftLimit = 97;
-        int rightLimit = 122;
-        int targetStringLength = 10;
-        Random random = new Random();
-        StringBuilder buffer = new StringBuilder(targetStringLength);
-        for (int i = 0; i < targetStringLength; i++) {
-            int randomLimitedInt = leftLimit + (int)
-                (random.nextFloat() * (rightLimit - leftLimit + 1));
-            buffer.append((char) randomLimitedInt);
-        }
-        return buffer.toString();
-    }
 
 
     /**
@@ -139,43 +116,12 @@ public final class HTTPStreamCodec implements EventCodec, Closeable {
      * @param runtimeVersion underlying JVM version to report to the runtime
      */
     HTTPStreamCodec(Map<String, String> env, String fdkVersion, String runtimeVersion) {
-        this.env = Objects.requireNonNull(env, "env");
         this.fdkVersion = Objects.requireNonNull(fdkVersion, "fdkVersion");
         this.runtimeVersion = Objects.requireNonNull(runtimeVersion, "runtimeVersion");
-        String listenerAddress = getRequiredEnv(FN_LISTENER);
-
-        if (!listenerAddress.startsWith("unix:/")) {
-            throw new FunctionInitializationException("Invalid listener address - it should start with unix:/ :'" + listenerAddress + "'");
-        }
-        String listenerFile = listenerAddress.substring("unix:".length());
-
-        socketFile = new File(listenerFile);
-
-
-        UnixServerSocket serverSocket = null;
-        File listenerDir = socketFile.getParentFile();
-        tempFile = new File(listenerDir, randomString() + ".sock");
-        try {
-
-            serverSocket = UnixServerSocket.listen(tempFile.getAbsolutePath(), 1);
-            // Adjust socket permissions and move file
-            Files.setPosixFilePermissions(tempFile.toPath(), PosixFilePermissions.fromString("rw-rw-rw-"));
-            Files.createSymbolicLink(socketFile.toPath(), tempFile.toPath().getFileName());
-
-            this.socket = serverSocket;
-        } catch (IOException e) {
-            if (serverSocket != null) {
-                try {
-                    serverSocket.close();
-                } catch (IOException ignored) {
-                }
-
-            }
-            throw new FunctionInitializationException("Unable to bind to unix socket in " + socketFile, e);
-        }
-
-
+        socketDelegate = new SocketDelegate(env);
+        socketDelegate.openSocket();
     }
+
 
 
     private String jsonError(String message, String detail) {
@@ -238,7 +184,7 @@ public final class HTTPStreamCodec implements EventCodec, Closeable {
         try {
 
             while (!stopping.get()) {
-                try (UnixSocket sock = socket.accept(100)) {
+                try (UnixSocket sock = socketDelegate.accept()) {
                     if (sock == null) {
                         // timeout during accept, try again
                         continue;
@@ -285,13 +231,6 @@ public final class HTTPStreamCodec implements EventCodec, Closeable {
     }
 
 
-    private String getRequiredEnv(String name) {
-        String val = env.get(name);
-        if (val == null) {
-            throw new FunctionInputHandlingException("Required environment variable " + name + " is not set - are you running a function outside of fn run?");
-        }
-        return val;
-    }
 
     private static String getRequiredHeader(HttpRequest request, String headerName) {
         Header header = request.getFirstHeader(headerName);
@@ -382,14 +321,13 @@ public final class HTTPStreamCodec implements EventCodec, Closeable {
     @Override
     public void close() throws IOException {
         if (stopping.compareAndSet(false, true)) {
-            socket.close();
+            socketDelegate.socket.close();
 
             try {
                 stopped.get();
             } catch (Exception ignored) {
             }
-            socketFile.delete();
-            tempFile.delete();
+            socketDelegate.finish();
         }
 
     }

@@ -17,6 +17,10 @@
 package com.fnproject.fn.runtime;
 
 
+import java.io.BufferedWriter;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.PrintWriter;
 import java.lang.reflect.InvocationTargetException;
 import java.util.Optional;
 
@@ -29,6 +33,8 @@ import com.fnproject.fn.api.RuntimeContext;
 import com.fnproject.fn.api.exception.FunctionInputHandlingException;
 import com.fnproject.fn.api.exception.FunctionOutputHandlingException;
 import com.fnproject.fn.runtime.exception.InternalFunctionInvocationException;
+import org.crac.CheckpointException;
+import org.crac.RestoreException;
 
 /**
  * Method function invoker
@@ -61,7 +67,6 @@ public class MethodFunctionInvoker implements FunctionInvoker {
         } catch (IllegalAccessException | InvocationTargetException e) {
             throw new InternalFunctionInvocationException(e.getCause().getMessage(), e.getCause());
         }
-
         return coerceReturnValue(ctx, method, rawResult);
     }
 
